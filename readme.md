@@ -1,33 +1,37 @@
 # An Audio Player for mbed-os
 
-This library can be used to play audio on mbed-os devices with AnalogOut support.
-
-## Hardware setup
-
-To play audio the AnalogOut pin of your board must be connect to the right circuitry. If you are connected to speakers using a headphone jack you can use a ~10:1 voltage divider (analog out to 9K ohm to 1K  to ground is sufficient) to reduce the voltage to the correct level. You'll also need an electrolytic or ceramic capacitor in series to act as a DC filter (0.1uf or larger recommended).
+This library can be used to play wave audio on mbed-os devices over PWM.
 
 ## Example usage
+Play music on NUCLEO_F412ZG. Speaker is connected to PA_0.
 
 ```
 #include "mbed.h"
-
 #include "SDBlockDevice.h"
 #include "FATFileSystem.h"
 #include "AudioPlayer.h"
 
-SDBlockDevice sd(PTE3, PTE1, PTE2, PTE4);
+// PWM
+PwmOut speaker(PA_0);
+
+// Connection for SD card
+SDBlockDevice   sd(PB_5, PB_4, PB_3, D2);
 FATFileSystem fs("sd", &sd);
 
-AnalogOut aout(DAC0_OUT);
-AudioPlayer player(&aout);
+DigitalOut led1(LED1);
+AudioPlayer player(&speaker);
 
 int main()
 {
+    // set PWN frequency
+    speaker.period_us(40);
+
     // Set the maximum speed so it can keep up with audio
     sd.frequency(25000000);
 
-    File file(&fs, "songs/my_song.wav");
+    File file(&fs, "sample.wav");
     player.play(&file);
+
 }
 
 ```

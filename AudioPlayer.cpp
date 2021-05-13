@@ -16,12 +16,14 @@
 
 #include "AudioPlayer.h"
 #include "WaveAudioStream.h"
+#include <chrono>
 
 #define AUDIO_BUF_SIZE      (1 * 1024)
 #define MIN_FREQUENCY_HZ    8000
 
 #define FLAG_BUF_FREE       (1 << 0)
-#define FLAG_DETACH         (1 << 1)
+#define FLAG_END            (1 << 1)
+#define FLAG_STOP           (1 << 2)
 
 #define ERROR_FREQUENCY_HZ  1000
 #define ERROR_DURATION_MS   1000
@@ -34,6 +36,8 @@ struct audio_buffer_t {
     uint32_t size;
     uint32_t max_size;
 };
+
+using namespace std::chrono;
 
 static void enque_list(audio_buffer_t **list, audio_buffer_t *element)
 {
@@ -85,91 +89,9 @@ static void reduce_to_8(uint8_t *dest, uint8_t *source, uint8_t channels, uint32
 }
 
 
-class UnifiedAudioStream : public AudioStream
+static microseconds div_round(uint32_t dividend, uint32_t divisior)
 {
-public:
-    UnifiedAudioStream(AudioStream *stream, uint32_t sample_buf = AUDIO_BUF_SIZE / 2):
-            _stream(stream), _channels(0), _sample_size(0), _buf_size(0),
-            _buf_count(0),_buf(NULL) {
-        _sample_size = _stream->get_bytes_per_sample();
-        _channels = _stream->get_channels();
-        _buf_count = sample_buf;
-        _buf_size = _buf_count * _sample_size * _channels;
-        _buf = new uint8_t[_buf_size];
-
-    }
-
-    virtual uint32_t get_channels() {
-        return 1;
-    }
-
-    virtual uint32_t get_bytes_per_sample() {
-        return 1;
-    }
-
-    virtual uint32_t get_sample_rate() {
-        return _stream->get_sample_rate();
-    }
-
-    /**
-     * Read from the audio stream
-     *
-     * @param data      Audio data
-     * @param size      Size of audio data to read
-     * @return          Size read or -1 if no more data
-     */
-    virtual int read(uint8_t *data, uint32_t size) {
-        uint32_t total = 0;
-        while (size > 0) {
-            uint32_t read_count = size < _buf_count ? size : _buf_count;
-            uint32_t read_size = read_count * _channels * _sample_size;
-            int ret = _stream->read(_buf, read_size);
-            if (ret <= 0) {
-                if (total > 0) {
-                    return total;
-                }
-                return ret;
-            }
-
-            read_count = ret / (_channels * _sample_size);
-            reduce_to_8(data, _buf, _channels, read_count, _sample_size);
-            total += read_count;
-
-            MBED_ASSERT(size >= read_count);
-            data += read_count;
-            size -= read_count;
-        }
-        return total;
-    }
-
-    /**
-     * Close this stream
-     *
-     * Release the resources associated with this stream
-     */
-    virtual void close() {
-        if (_stream != NULL) {
-            _stream->close();
-            _stream = NULL;
-        }
-    }
-
-    virtual ~UnifiedAudioStream() {
-        delete[] _buf;
-    }
-
-protected:
-    AudioStream *_stream;
-    uint32_t _channels;
-    uint32_t _sample_size;
-    uint32_t _buf_size;
-    uint32_t _buf_count;
-    uint8_t *_buf;
-};
-
-static uint32_t div_round(uint32_t dividend, uint32_t divisior)
-{
-    return (dividend + divisior / 2) / divisior;
+    return  microseconds ((dividend + divisior / 2) / divisior);
 }
 
 bool AudioPlayer::_load_next_buf(AudioStream *stream)
@@ -191,7 +113,7 @@ bool AudioPlayer::_load_next_buf(AudioStream *stream)
     return true;
 }
 
-AudioPlayer::AudioPlayer(AnalogOut *mono):
+AudioPlayer::AudioPlayer(PwmOut *mono):
         _frequency(0), _mono(mono), _used_bufs(0), _free_bufs(0),
         _cur_buf(0), _cur_pos(0), _error_count(0)
 {
@@ -230,7 +152,7 @@ void AudioPlayer::_ticker_handler()
     if (_error_count) {
         // Play error tone
         uint16_t tone = _error_tone();
-        _mono->write_u16(tone);
+        _mono->write(float(tone/65536));
         return;
     }
 
@@ -239,7 +161,7 @@ void AudioPlayer::_ticker_handler()
         _cur_pos = 0;
         if (NULL == _cur_buf) {
             // No data so turn off audio
-            _flags.set(FLAG_DETACH);
+            _flags.set(FLAG_END);
             _frequency = 0;
             _ticker.detach();
             return;
@@ -247,8 +169,9 @@ void AudioPlayer::_ticker_handler()
     }
 
     // Write audio data
-    _mono->write_u16(_cur_buf->data[_cur_pos] << 8);
-    _cur_pos++;
+    float  value = *(uint16_t *)(_cur_buf->data+_cur_pos)/65536.0;
+    _mono->write(value);
+    _cur_pos += 2;
     if (_cur_pos >= _cur_buf->size) {
         enque_list(&_free_bufs, _cur_buf);
         _cur_buf = NULL;
@@ -284,31 +207,40 @@ bool AudioPlayer::play(File *file)
 {
     MBED_ASSERT(_flags.get() == 0);
 
-    WaveAudioStream raw_stream(file);
-    if (!raw_stream.get_valid()) {
+    WaveAudioStream stream(file);
+    if (!stream.get_valid()) {
         return false;
     }
-    UnifiedAudioStream stream(&raw_stream);
 
     bool ret = true;
     _load_next_buf(&stream);
     _load_next_buf(&stream);
     _frequency =  stream.get_sample_rate();
-    uint32_t tick_us = div_round(1000000, _frequency);
-    _ticker.attach_us(Callback<void()>(this, &AudioPlayer::_ticker_handler), tick_us);
+    microseconds tick_us = div_round(1000000, _frequency);
+    _ticker.attach(Callback<void()>(this, &AudioPlayer::_ticker_handler), tick_us);
 
     do {
-        uint32_t flags = _flags.wait_any(FLAG_BUF_FREE | FLAG_DETACH);
-        if (flags & FLAG_DETACH) {
+        uint32_t flags = _flags.wait_any(FLAG_BUF_FREE | FLAG_END | FLAG_STOP);
+        if (flags & FLAG_END) {
+            debug("Error on playing audio\n");
             play_error();
             ret = false;
             break;
+        }else  if (flags & FLAG_STOP) {
+            debug("Stop playing audio\n");
+            ret = true;
+            break;
         }
     } while (_load_next_buf(&stream));
-    _flags.wait_any(FLAG_DETACH);
+    _flags.wait_any(FLAG_END | FLAG_STOP);
     _flags.clear();
 
     return ret;
+}
+
+void AudioPlayer::stop()
+{
+    _flags.set(FLAG_STOP);
 }
 
 void AudioPlayer::play_error()
@@ -316,8 +248,8 @@ void AudioPlayer::play_error()
     core_util_critical_section_enter();
     if (_frequency == 0) {
         _frequency = MIN_FREQUENCY_HZ;
-        uint32_t tick_us = div_round(1000000, _frequency);
-        _ticker.attach_us(Callback<void()>(this, &AudioPlayer::_ticker_handler), tick_us);
+        microseconds tick_us = div_round(1000000, _frequency);
+        _ticker.attach(Callback<void()>(this, &AudioPlayer::_ticker_handler), tick_us);
     }
     _error_count = _frequency / 1000 * ERROR_DURATION_MS;
     core_util_critical_section_exit();

@@ -25,9 +25,11 @@ class AudioPlayer : private NonCopyable<AudioPlayer> {
 
 public:
 
-    AudioPlayer(AnalogOut *mono);
+    AudioPlayer(PwmOut *mono);
 
     bool play(File *file);
+
+    void stop();
 
     ~AudioPlayer();
 
@@ -37,7 +39,8 @@ protected:
     Ticker _ticker;
     EventFlags _flags;
     uint32_t _frequency;
-    AnalogOut *_mono;
+    //AnalogOut *_mono;
+    PwmOut *_mono;
     audio_buffer_t *_used_bufs;
     audio_buffer_t *_free_bufs;
     audio_buffer_t *_cur_buf;
