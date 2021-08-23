@@ -18,7 +18,6 @@ PwmOut speaker(PA_0);
 SDBlockDevice   sd(PB_5, PB_4, PB_3, D2);
 FATFileSystem fs("sd", &sd);
 
-DigitalOut led1(LED1);
 AudioPlayer player(&speaker);
 
 int main()
