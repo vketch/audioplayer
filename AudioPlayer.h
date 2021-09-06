@@ -19,6 +19,8 @@
 #include "mbed.h"
 #include "AudioStream.h"
 
+//#define DUMP_DATA
+
 struct audio_buffer_t;
 
 class AudioPlayer : private NonCopyable<AudioPlayer> {
@@ -32,6 +34,12 @@ public:
     void stop();
 
     ~AudioPlayer();
+#ifdef DUMP_DATA	
+   // for  dumping data 
+   // static const size_t _data_max = 32000;
+   // float _data[_data_max];
+   // short _data_n; 
+#endif  
 
 protected:
     void play_error();
@@ -51,7 +59,7 @@ protected:
     bool _load_next_buf(AudioStream *stream);
     uint16_t _error_tone();
 
-    void _wait_for_complete();
+    void _move_buffers2free();
 
 };
 

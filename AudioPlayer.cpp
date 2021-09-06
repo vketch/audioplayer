@@ -18,23 +18,27 @@
 #include "WaveAudioStream.h"
 #include <chrono>
 
-#define AUDIO_BUF_SIZE      (1 * 1024)
+#define AUDIO_BUF_SIZE      (1 * 512)
 #define MIN_FREQUENCY_HZ    8000
 
 #define FLAG_BUF_FREE       (1 << 0)
 #define FLAG_END            (1 << 1)
 #define FLAG_STOP           (1 << 2)
+#define FLAG_IS_PAYING      (1 << 3)
 
 #define ERROR_FREQUENCY_HZ  1000
 #define ERROR_DURATION_MS   1000
 #define ERROR_COUNT         3
 #define ERROR_LOUDNESS      (1 << 13)
 
+#define NUMBER_OF_BUFFER    8
+
 struct audio_buffer_t {
     audio_buffer_t *next;
     uint8_t *data;
     uint32_t size;
     uint32_t max_size;
+
 };
 
 using namespace std::chrono;
@@ -113,19 +117,31 @@ bool AudioPlayer::_load_next_buf(AudioStream *stream)
     return true;
 }
 
+void AudioPlayer::_move_buffers2free(){
+    audio_buffer_t *entry = deque_list(&_used_bufs);
+    while (entry != NULL) {
+        enque_list(&_free_bufs, entry);
+        entry = deque_list(&_used_bufs);
+    }
+    if(_cur_buf != NULL) {
+        enque_list(&_free_bufs, _cur_buf);
+        _cur_buf = NULL;
+    }
+
+}
+
 AudioPlayer::AudioPlayer(PwmOut *mono):
         _frequency(0), _mono(mono), _used_bufs(0), _free_bufs(0),
         _cur_buf(0), _cur_pos(0), _error_count(0)
 {
-    audio_buffer_t *ping = new audio_buffer_t();
-    ping->data = new uint8_t[AUDIO_BUF_SIZE]();
-    ping->max_size = AUDIO_BUF_SIZE;
-    enque_list(&_free_bufs, ping);
+    for( int i =0; i<NUMBER_OF_BUFFER; i++ ){
+        audio_buffer_t *ping = new audio_buffer_t();
+        ping->data = new uint8_t[AUDIO_BUF_SIZE]();
+        ping->max_size = AUDIO_BUF_SIZE;
+        enque_list(&_free_bufs, ping);
+    }
 
-    audio_buffer_t *pong = new audio_buffer_t();
-    pong->data = new uint8_t[AUDIO_BUF_SIZE]();
-    pong->max_size = AUDIO_BUF_SIZE;
-    enque_list(&_free_bufs, pong);
+    _flags.clear();
 }
 
 AudioPlayer::~AudioPlayer()
@@ -157,24 +173,29 @@ void AudioPlayer::_ticker_handler()
     }
 
     if (NULL == _cur_buf) {
-        _cur_buf = deque_list(&_used_bufs);
-        _cur_pos = 0;
-        if (NULL == _cur_buf) {
-            // No data so turn off audio
-            _flags.set(FLAG_END);
-            _frequency = 0;
-            _ticker.detach();
-            return;
-        }
+        _flags.set(FLAG_END);
+        _frequency = 0;
+        _ticker.detach();
+        return;
     }
-
-    // Write audio data
-    float  value = *(uint16_t *)(_cur_buf->data+_cur_pos)/65536.0;
-    _mono->write(value);
+	
+	// Write audio
+    float  value = (*(int16_t *)(_cur_buf->data+_cur_pos)/65536.0) + 0.5;
+    _mono->write(value); 
+	
+#ifdef DUMP_DATA	
+    //Kernel::Clock::now();
+    if( _data_n < _data_max ){
+        _data[_data_n] = value;
+        _data_n++;
+    }
+#endif
+	
     _cur_pos += 2;
     if (_cur_pos >= _cur_buf->size) {
         enque_list(&_free_bufs, _cur_buf);
-        _cur_buf = NULL;
+        _cur_buf = deque_list(&_used_bufs);
+        _cur_pos = 0;
         _flags.set(FLAG_BUF_FREE);
     }
 }
@@ -205,16 +226,32 @@ uint16_t AudioPlayer::_error_tone()
 
 bool AudioPlayer::play(File *file)
 {
+    debug("Start playing audio\n");
+
     MBED_ASSERT(_flags.get() == 0);
+
+    _flags.set(FLAG_IS_PAYING);
+    _data_n = 0;    
 
     WaveAudioStream stream(file);
     if (!stream.get_valid()) {
+        printf("Invalid file stream\n");
+        _flags.clear();
         return false;
     }
 
+    
     bool ret = true;
-    _load_next_buf(&stream);
-    _load_next_buf(&stream);
+
+    // load all buffers
+    for( int i =0; i<NUMBER_OF_BUFFER; i++ ){    
+        _load_next_buf(&stream);
+    }
+
+    // set current buffer
+    _cur_buf = deque_list(&_used_bufs);
+    _cur_pos = 0;
+
     _frequency =  stream.get_sample_rate();
     microseconds tick_us = div_round(1000000, _frequency);
     _ticker.attach(Callback<void()>(this, &AudioPlayer::_ticker_handler), tick_us);
@@ -228,19 +265,26 @@ bool AudioPlayer::play(File *file)
             break;
         }else  if (flags & FLAG_STOP) {
             debug("Stop playing audio\n");
+            _ticker.detach();  // stop ticker
+            _move_buffers2free(); // move all used buffrs to free
+            _flags.set( FLAG_END ); 
             ret = true;
             break;
         }
     } while (_load_next_buf(&stream));
-    _flags.wait_any(FLAG_END | FLAG_STOP);
+
+    _flags.wait_any(FLAG_END);    
     _flags.clear();
+    debug("End playing audio\n");    
 
     return ret;
 }
 
 void AudioPlayer::stop()
 {
-    _flags.set(FLAG_STOP);
+    if( _flags.get() & FLAG_IS_PAYING  ){ 
+        _flags.set( FLAG_STOP );
+    }
 }
 
 void AudioPlayer::play_error()
@@ -248,8 +292,8 @@ void AudioPlayer::play_error()
     core_util_critical_section_enter();
     if (_frequency == 0) {
         _frequency = MIN_FREQUENCY_HZ;
-        microseconds tick_us = div_round(1000000, _frequency);
-        _ticker.attach(Callback<void()>(this, &AudioPlayer::_ticker_handler), tick_us);
+        microseconds tick_us = div_round( 1000000, _frequency );
+        _ticker.attach( Callback<void()>(this, &AudioPlayer::_ticker_handler), tick_us );
     }
     _error_count = _frequency / 1000 * ERROR_DURATION_MS;
     core_util_critical_section_exit();
