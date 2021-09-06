@@ -231,7 +231,10 @@ bool AudioPlayer::play(File *file)
     MBED_ASSERT(_flags.get() == 0);
 
     _flags.set(FLAG_IS_PAYING);
+
+#ifdef DUMP_DATA    
     _data_n = 0;    
+#endif
 
     WaveAudioStream stream(file);
     if (!stream.get_valid()) {

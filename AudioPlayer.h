@@ -35,10 +35,10 @@ public:
 
     ~AudioPlayer();
 #ifdef DUMP_DATA	
-   // for  dumping data 
-   // static const size_t _data_max = 32000;
-   // float _data[_data_max];
-   // short _data_n; 
+   for  dumping data 
+   static const size_t _data_max = 32000;
+   float _data[_data_max];
+   short _data_n; 
 #endif  
 
 protected:
